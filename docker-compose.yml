@@ -1,0 +1,74 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pulseiq_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: pulseiq_dw
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/init_schema.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d pulseiq_dw"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  warehouse_loader:
+    build: .
+    container_name: pulseiq_warehouse_loader
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./docs:/app/docs
+      - ./sql:/app/sql
+      - ./src:/app/src
+    command: ["sh", "-c", "python src/load_warehouse.py && python src/verify_warehouse.py"]
+
+  superset:
+    image: apache/superset:latest
+    container_name: pulseiq_superset
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    environment:
+      SUPERSET_SECRET_KEY: "pulseiq_super_secret_analytics_key_2026_dev"
+      SQLALCHEMY_DATABASE_URI: "sqlite:////app/superset_home/superset.db"
+      SUPERSET_PORT: 8088
+    volumes:
+      - superset_home:/app/superset_home
+      - ./dashboards:/app/dashboards
+      - ./scripts:/app/scripts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ ! -f /app/superset_home/.initialized ]; then
+          echo "Initializing Superset Database..."
+          superset db upgrade
+          echo "Creating Admin User..."
+          superset fab create-admin --username admin --firstname Superset --lastname Admin --email admin@pulseiq.internal --password admin
+          echo "Initializing Roles..."
+          superset init
+          echo "Bootstrapping Warehouse Connection and Assets..."
+          python3 /app/scripts/setup_superset.py || true
+          touch /app/superset_home/.initialized
+          echo "Superset Initialized Successfully."
+        fi
+        echo "Starting Apache Superset on port 8088..."
+        /usr/bin/run-server.sh
+
+volumes:
+  pgdata:
+  superset_home:
